@@ -1,0 +1,11 @@
+{
+  "name": "android-project-lens",
+  "version": "0.1.0",
+  "description": "Android project facts for the model: a nav_graph route index, Compose stability reports on demand, and the real manifest SDKs and permissions.",
+  "author": {
+    "name": "NathanWA",
+    "url": "https://github.com/NathanWA"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

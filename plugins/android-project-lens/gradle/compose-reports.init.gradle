@@ -1,0 +1,30 @@
+// android-project-lens: Compose compiler reports for one /stability run.
+//
+// Passed with --init-script by the /stability command alone; the mod never
+// adds it to an ordinary build. Groovy, not Kotlin DSL, so the composeCompiler
+// extension resolves dynamically with no classpath matched to the project's
+// Kotlin version. Needs the Kotlin Compose compiler Gradle plugin (Kotlin 2.0+).
+
+def lensReportDirs = [:]
+
+allprojects { project ->
+    project.plugins.withId('org.jetbrains.kotlin.plugin.compose') {
+        def reports = project.layout.buildDirectory.dir('compose_compiler')
+        def compose = project.extensions.getByName('composeCompiler')
+        compose.reportsDestination.set(reports)
+        compose.metricsDestination.set(reports)
+        lensReportDirs[project.path] = reports
+
+        // Reports cover only what a run compiles: make this run compile everything.
+        project.tasks.matching { it.name.startsWith('compile') && it.name.contains('Kotlin') }.configureEach { task ->
+            task.outputs.upToDateWhen { false }
+        }
+    }
+}
+
+// A module index at the root, so the mod reads report folders without walking the tree.
+gradle.projectsEvaluated { g ->
+    def index = new File(g.rootProject.layout.buildDirectory.get().asFile, 'android-project-lens/compose-modules.txt')
+    index.parentFile.mkdirs()
+    index.text = lensReportDirs.collect { path, dir -> "${path}=${dir.get().asFile.absolutePath}" }.join('\n') + '\n'
+}

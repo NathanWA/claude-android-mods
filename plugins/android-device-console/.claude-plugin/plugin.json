@@ -1,0 +1,25 @@
+{
+  "name": "android-device-console",
+  "version": "0.1.0",
+  "description": "Live Android device console: UI-state toggles, Doze and standby controls, WorkManager job runner, and the device state in the system prompt.",
+  "author": {
+    "name": "NathanWA",
+    "url": "https://github.com/NathanWA"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "package": {
+      "type": "string",
+      "title": "Application id",
+      "description": "The app's applicationId for Doze buckets and jobs. Left empty, it is read from app/build.gradle(.kts).",
+      "default": ""
+    },
+    "pollSeconds": {
+      "type": "number",
+      "title": "Refresh period (seconds)",
+      "description": "How often device state is re-read when $.process is available. 0 turns polling off. Never polls through the Bash tool.",
+      "default": 15
+    }
+  }
+}

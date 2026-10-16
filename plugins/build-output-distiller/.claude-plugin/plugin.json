@@ -1,0 +1,11 @@
+{
+  "name": "build-output-distiller",
+  "version": "0.1.0",
+  "description": "Distills Gradle output for Android builds: Kotlin, KSP, Hilt/Dagger, Room, AAPT, R8 and test failures as file:line lists with fix hints, and flags a failure that repeats.",
+  "author": {
+    "name": "NathanWA",
+    "url": "https://github.com/NathanWA"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

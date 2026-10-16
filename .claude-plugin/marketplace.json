@@ -1,0 +1,29 @@
+{
+  "name": "claude-android-mods",
+  "owner": { "name": "NathanWA", "url": "https://github.com/NathanWA" },
+  "metadata": {
+    "description": "Claude Code mods for Android and Kotlin Multiplatform development."
+  },
+  "plugins": [
+    {
+      "name": "build-output-distiller",
+      "source": "./plugins/build-output-distiller",
+      "description": "Turns Gradle output into a short digest of errors with file:line lists and fix hints, and flags a failure that repeats."
+    },
+    {
+      "name": "android-logcat",
+      "source": "./plugins/android-logcat",
+      "description": "Bounds the model's adb logcat calls, redacts secrets from adb output, and keeps a pid-scoped logcat buffer with a grep tool and a /logcat pane."
+    },
+    {
+      "name": "android-device-console",
+      "source": "./plugins/android-device-console",
+      "description": "Live device toggles, Doze and standby controls, a WorkManager job runner, and the device state in the system prompt."
+    },
+    {
+      "name": "android-project-lens",
+      "source": "./plugins/android-project-lens",
+      "description": "A navigation route index, Compose stability reports on demand, and the real manifest SDKs and permissions for the model."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "android-logcat",
+  "version": "0.1.0",
+  "description": "Bounds the model's adb logcat calls, redacts secrets from adb output, keeps a pid-scoped logcat buffer with a grep tool and a /logcat pane.",
+  "author": {
+    "name": "NathanWA",
+    "url": "https://github.com/NathanWA"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
