@@ -2,8 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { fixJobschedulerCommand, parseJobs, parseState } from '../hooks/adb'
-import { ONE_JOB, PKG, SERIAL, TWO_JOBS, fakeDevice, newFake, stateOutput } from './fake-device'
+import { fixJobschedulerCommand, parseAppLocales, parseJobs, parseState } from '../hooks/adb'
+import { ONE_JOB, PKG, SERIAL, TWO_JOBS, WM_NS, fakeDevice, namespacedDump, newFake, stateOutput } from './fake-device'
 
 const OPTIONS = { options: { package: PKG, pollSeconds: 0 } }
 const SET = 'mcp__android-device-console__set_device_state'
@@ -53,7 +53,7 @@ test('set_device_state sets density, RTL, layout bounds and animations', OPTIONS
   expect(text).toContain('forced RTL on')
   expect(text).toContain('layout bounds on')
   expect(text).toContain('animations off')
-  expect(text).toContain('restart the app')
+  expect(text).toContain("app's per-app locale (he")
   const script = fake.scripts()[0]!
   expect(script).toContain('wm density 560')
   expect(script).toContain('settings put global window_animation_scale 0')
@@ -108,7 +108,7 @@ test('run_worker finds the only job and force-runs it', OPTIONS, async ($, on) =
   const r = await $.tool.call({ tool: RUN })
 
   expect(r.deny).toBeUndefined()
-  expect(String(r.result)).toContain(`Forced job 7 of ${PKG}`)
+  expect(String(r.result)).toContain(`Forced job 7 (WorkSpec 2c3f6a1e-90ab-4cde-8f01-1234567890ab) of ${PKG}`)
   expect(fake.scripts()).toEqual([`dumpsys jobscheduler ${PKG}`, `cmd jobscheduler run -f ${PKG} 7`])
 })
 
@@ -263,7 +263,7 @@ test('without $.process the band presses go through the Bash tool with consent',
     consents.push((e as { consent?: string }).consent)
     const script = /shell '(.*)'$/s.exec(e.command)?.[1]?.replaceAll(`'\\''`, "'") ?? ''
     fake.calls.push(['adb', '-s', SERIAL, 'shell', script])
-    const stdout = stateOutput(fake.state)
+    const stdout = stateOutput(fake)
     return { result: { stdout: script.startsWith('echo @@out') ? `@@out\n${stdout}` : stdout, stderr: '', interrupted: false } }
   })
 
@@ -344,4 +344,193 @@ test('the /device pane draws toggles, Doze controls and a run button per job', O
   await ui.press({ key: 'run-7' })
   expect(fake.scripts().at(-1)).toBe(`cmd jobscheduler run -f ${PKG} 7`)
   await ui.unmount()
+})
+
+// --- API 34+: JobScheduler namespaces and job ids that change -------------------
+
+// The line as an API 35 emulator printed it for a WorkManager job.
+const API35_LINE = `  JOB ${WM_NS}:u0a215/2: 67db562 @${WM_NS}@com.nathan.moddemoapp/androidx.work.impl.background.systemjob.SystemJobService`
+
+test('parseJobs reads the namespaced dumpsys line of API 34+', () => {
+  expect(parseJobs(`Registered 1 jobs:\n${API35_LINE}\n    Unsatisfied constraints: CHARGING IDLE [0x5]\n`, 'com.nathan.moddemoapp')).toEqual([
+    {
+      id: 2,
+      namespace: WM_NS,
+      component: 'com.nathan.moddemoapp/androidx.work.impl.background.systemjob.SystemJobService',
+      workSpecId: null,
+      required: null,
+      unsatisfied: 'CHARGING IDLE [0x5]',
+    },
+  ])
+  // The same id in two namespaces is two jobs; the pre-34 line has none.
+  const both = parseJobs(namespacedDump([{ id: 0, namespace: WM_NS }, { id: 0, namespace: null }]), PKG)
+  expect(both.map(job => [job.id, job.namespace])).toEqual([
+    [0, WM_NS],
+    [0, null],
+  ])
+  expect(parseJobs(ONE_JOB, PKG)[0]?.namespace).toBeNull()
+})
+
+test('run_worker passes -n for a WorkManager job on API 35', OPTIONS, async ($, on) => {
+  mock.env(on, { ANDROID_SERIAL: SERIAL })
+  const fake = fakeDevice(on, null)
+  fake.scheduled = [{ id: 2, namespace: WM_NS }]
+
+  const r = await $.tool.call({ tool: RUN })
+
+  expect(r.deny).toBeUndefined()
+  expect(String(r.result)).toContain(`Forced job 2 (namespace ${WM_NS}) of ${PKG}`)
+  expect(fake.scripts().at(-1)).toBe(`cmd jobscheduler run -f -n ${WM_NS} ${PKG} 2`)
+})
+
+test('a job id that changed since the list was read is re-resolved', OPTIONS, async ($, on) => {
+  mock.env(on, { ANDROID_SERIAL: SERIAL })
+  const fake = fakeDevice(on, null)
+  fake.scheduled = [{ id: 0, namespace: WM_NS }]
+  await $.tool.call({ tool: RUN })
+
+  // The app enqueued the work again: WorkManager gave it job id 1.
+  fake.scheduled = [{ id: 1, namespace: WM_NS }]
+  const r = await $.tool.call({ tool: RUN, jobId: 0 })
+
+  expect(r.deny).toBeUndefined()
+  expect(String(r.result)).toContain('Job 0 is no longer scheduled; ran job 1')
+  expect(fake.scripts().slice(-3)).toEqual([
+    `cmd jobscheduler run -f -n ${WM_NS} ${PKG} 0`,
+    `dumpsys jobscheduler ${PKG}`,
+    `cmd jobscheduler run -f -n ${WM_NS} ${PKG} 1`,
+  ])
+
+  // With two WorkManager jobs in its place, it asks rather than guesses.
+  fake.scheduled = [
+    { id: 5, namespace: WM_NS },
+    { id: 6, namespace: WM_NS },
+  ]
+  const ambiguous = await $.tool.call({ tool: RUN, jobId: 1 })
+  expect(ambiguous.deny).toContain('Could not find job 1')
+  expect(ambiguous.deny).toContain(`5 (namespace ${WM_NS}), 6 (namespace ${WM_NS})`)
+  expect(fake.scripts().at(-1)).toBe(`dumpsys jobscheduler ${PKG}`)
+})
+
+test('the pane lists namespaced jobs and Run reaches the WorkManager job', OPTIONS, async ($, on) => {
+  mock.env(on, { ANDROID_SERIAL: SERIAL })
+  mock.clock(on)
+  const fake = fakeDevice(on, null)
+  fake.scheduled = [{ id: 3, namespace: WM_NS }]
+  await $.tool.call({ tool: DOZE, state: 'off' })
+  await $.tool.call({ tool: RUN })
+
+  const ui = await $.ui.mount({
+    plugin: 'android-device-console',
+    surface: 'desktop',
+    component: 'Pane',
+    requestId: 'device-console',
+    props: { title: 'Android device', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+  })
+  expect(await ui.find({ type: 'Text', text: /WorkManager/ })).toBeDefined()
+  fake.scheduled = [{ id: 4, namespace: WM_NS }]
+  await ui.press({ key: `run-3-${WM_NS}` })
+  expect(fake.scripts().at(-1)).toBe(`cmd jobscheduler run -f -n ${WM_NS} ${PKG} 4`)
+  await ui.unmount()
+})
+
+test('the fixer adds -n from the known jobs and leaves text that runs nothing alone', OPTIONS, async ($, on) => {
+  mock.env(on, { ANDROID_SERIAL: SERIAL })
+  const fake = fakeDevice(on, null)
+  fake.scheduled = [{ id: 2, namespace: WM_NS }]
+  const seen = bash(on)
+  await $.tool.call({ tool: RUN })
+
+  const r = await $.tool.call({ tool: 'Bash', command: `adb shell cmd jobscheduler run -f ${PKG} 2` })
+  expect(seen).toEqual([`adb shell cmd jobscheduler run -f -n ${WM_NS} ${PKG} 2`])
+  expect(r.context?.join('\n')).toContain(`added -n ${WM_NS}`)
+
+  // An id it cannot place is left for the device to answer.
+  await $.tool.call({ tool: 'Bash', command: `adb shell cmd jobscheduler run -f ${PKG} 9` })
+  expect(seen.at(-1)).toBe(`adb shell cmd jobscheduler run -f ${PKG} 9`)
+
+  // Writing, grepping or quoting the command runs no job: no rewrite, no refusal.
+  for (const command of [
+    `cat > notes.md <<'EOF'\nuse cmd jobscheduler run -f to force a job\nEOF`,
+    'grep -rn "cmd jobscheduler run" docs/',
+  ]) {
+    const quiet = await $.tool.call({ tool: 'Bash', command })
+    expect(quiet.deny).toBeUndefined()
+    expect(seen.at(-1)).toBe(command)
+  }
+})
+
+test('a hand-typed run that finds no job gets the namespace hint', OPTIONS, async ($, on) => {
+  mock.env(on, {})
+  on('tool.call', { tool: 'Bash' }, () => {
+    const text = `Could not find job 0 in package ${PKG} / user 0\nExit code 23`
+    return { isError: true as const, result: text, text }
+  })
+
+  const r = await $.tool.call({ tool: 'Bash', command: `adb shell cmd jobscheduler run -f ${PKG} 0` })
+
+  expect(r.isError).toBe(true)
+  expect(r.context?.join('\n')).toContain(`-n ${WM_NS}`)
+  expect(r.context?.join('\n')).toContain('run_worker')
+})
+
+// --- forced RTL -------------------------------------------------------------------
+
+test('on API 33+ forced RTL is a per-app RTL locale, and off puts the app locales back', OPTIONS, async ($, on) => {
+  mock.env(on, { ANDROID_SERIAL: SERIAL })
+  mock.clock(on)
+  const fake = fakeDevice(on)
+  fake.state.appLocales = 'fr-FR'
+
+  const r = await $.tool.call({ tool: SET, rtl: true })
+  expect(String(r.result)).toContain('forced RTL on (app locales he)')
+  expect(String(r.result)).toContain("Forced RTL through the app's per-app locale (he")
+  expect(fake.scripts()[0]).toContain(`cmd locale set-app-locales ${PKG} --locales he`)
+  expect(fake.scripts()[0]).toContain('-ge 33 ]')
+  expect(fake.state.rtl).toBe('0')
+
+  const off = await $.tool.call({ tool: SET, rtl: false })
+  expect(String(off.result)).toContain('forced RTL off (app locales fr-FR)')
+  expect(fake.scripts().at(-1)).toContain(`cmd locale set-app-locales ${PKG} --locales fr-FR; fi`)
+  expect(fake.state.appLocales).toBe('fr-FR')
+})
+
+test('/device reset clears an RTL app locale the app did not have before', OPTIONS, async ($, on) => {
+  mock.env(on, { ANDROID_SERIAL: SERIAL })
+  mock.clock(on)
+  const fake = fakeDevice(on)
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+
+  await $.tool.call({ tool: SET, rtl: true })
+  expect(fake.state.appLocales).toBe('he')
+  const reset = await $.command.run({
+    command: 'device',
+    args: 'reset',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 120 },
+  })
+
+  expect(reset.text).toContain('Reset to defaults.')
+  expect(fake.state.appLocales).toBe('')
+  expect(fake.state.rtl).toBe('0')
+  expect(fake.scripts().some(script => script.includes(`then cmd locale set-app-locales ${PKG}; fi`))).toBe(true)
+})
+
+test('below API 33 forced RTL falls back to debug.force_rtl and says so', OPTIONS, async ($, on) => {
+  mock.env(on, { ANDROID_SERIAL: SERIAL })
+  mock.clock(on)
+  const fake = fakeDevice(on, ONE_JOB, 31)
+
+  const r = await $.tool.call({ tool: SET, rtl: true, restartApp: true })
+
+  expect(fake.state.rtl).toBe('1')
+  expect(String(r.result)).toContain('forced RTL on')
+  expect(String(r.result)).toContain('debug.force_rtl and an app restart')
+  expect(fake.scripts()[0]).toContain(`am force-stop ${PKG}`)
+})
+
+test('parseAppLocales reads cmd locale output', () => {
+  expect(parseAppLocales(`Locales for ${PKG} for user 0 are [ar-XB]`)).toBe('ar-XB')
+  expect(parseAppLocales(`Locales for ${PKG} for user 0 are []`)).toBe('')
+  expect(parseAppLocales("cmd: Can't find service: locale")).toBeNull()
 })

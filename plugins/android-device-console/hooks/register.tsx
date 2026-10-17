@@ -11,6 +11,10 @@ import {
   describeDevice,
   dozeScript,
   fixJobschedulerCommand,
+  isJobMissing,
+  isRtlLocaleList,
+  jobLabel,
+  parseAppLocales,
   nextDensity,
   nextFontScale,
   parseDevices,
@@ -18,6 +22,7 @@ import {
   parseState,
   pickTarget,
   readChanges,
+  runJobScript,
   shellQuote,
   stateScript,
   splitSections,
@@ -41,6 +46,7 @@ const jobs = atom({ plugin: 'android-device-console', key: 'jobs' } as const, []
 const pkgAtom = atom({ plugin: 'android-device-console', key: 'pkg' } as const, null)
 const busy = atom({ plugin: 'android-device-console', key: 'busy' } as const, null)
 const lastMessage = atom({ plugin: 'android-device-console', key: 'lastMessage' } as const, null)
+const rtlRestore = atom({ plugin: 'android-device-console', key: 'rtlRestore' } as const, null)
 
 type Ran = { ok: boolean; out: string; err: string }
 type Ctx = { serial?: string; consent?: string; pkg?: string }
@@ -185,14 +191,38 @@ async function refreshState($: $, ctx: Ctx): Promise<string> {
 
 async function setDeviceState($: $, changes: DeviceChanges, ctx: Ctx & { restartApp?: boolean }): Promise<{ text: string } | { error: string }> {
   const pkg = await resolvePkg($, ctx.pkg)
-  const script = `echo @@out; ${changeScript(changes, ctx.restartApp ? pkg : null)}; ${stateScript(pkg)}`
+  const options = { restartPkg: ctx.restartApp ? pkg : null, pkg, restoreLocales: await read($, rtlRestore) }
+  const script = `echo @@out; ${changeScript(changes, options)}; ${stateScript(pkg)}`
   const r = await shell($, ctx, script, 'Set Android device UI state')
   if ('error' in r) return r
   if (!r.ran.ok) return { error: `adb failed: ${r.ran.err.trim() || r.ran.out.trim()}` }
+  const sections = splitSections(r.ran.out)
+  if (changes.rtl === true) {
+    // Keep the app's own locales to put back, unless they are already an RTL one.
+    const before = parseAppLocales(sections.get('rtlprev'))
+    if (before !== null && !isRtlLocaleList(before)) await update($, rtlRestore, () => before)
+  } else if (changes.rtl === false) {
+    await update($, rtlRestore, () => null)
+  }
   const state = await storeState($, r.serial, r.ran.out, pkg)
-  const note =
-    changes.rtl !== undefined && !ctx.restartApp ? '\nForced RTL applies to activities started after the change; restart the app (restartApp: true) to see it.' : ''
-  return { text: `Applied on ${r.serial}.\n${describeDevice(state, pkg)}${note}` }
+  return { text: `Applied on ${r.serial}.\n${describeDevice(state, pkg)}${rtlNote(changes, sections.get('rtlvia'), ctx.restartApp === true)}` }
+}
+
+function rtlNote(changes: DeviceChanges, via: string | undefined, isRestarted: boolean): string {
+  if (changes.rtl !== true) return ''
+  if (via === 'app-locale') {
+    return (
+      "\nForced RTL through the app's per-app locale (he, Hebrew): its activities recreate right-to-left at once. " +
+      'Text stays in the default language unless the app ships Hebrew strings; system UI stays left-to-right. ' +
+      'RTL off, or reset, puts back the locales the app had.'
+    )
+  }
+  return (
+    '\nForced RTL through the developer setting debug.force_rtl' +
+    (isRestarted ? ' and an app restart' : '') +
+    '. On Android 13+ it takes effect only after a configuration change or a reboot; ' +
+    'with the app package known, API 33+ uses a per-app RTL locale instead, which applies at once.'
+  )
 }
 
 async function setDoze($: $, input: { state?: 'idle' | 'off'; bucket?: string }, ctx: Ctx): Promise<{ text: string } | { error: string }> {
@@ -220,32 +250,74 @@ async function refreshJobs($: $, ctx: Ctx): Promise<{ jobs: Job[]; pkg: string }
   return { jobs: list, pkg }
 }
 
-async function runWorker($: $, input: { jobId?: number; workSpecId?: string }, ctx: Ctx): Promise<{ text: string } | { error: string }> {
+type RunInput = { jobId?: number; workSpecId?: string; namespace?: string }
+
+async function runWorker($: $, input: RunInput, ctx: Ctx): Promise<{ text: string } | { error: string }> {
   const pkg = await resolvePkg($, ctx.pkg)
   if (pkg === null) return { error: 'No application id is known: pass package, or set it in the plugin options.' }
-  let id = input.jobId
-  if (id === undefined) {
+  const named = (list: readonly Job[]) =>
+    list.filter(job => job.id === input.jobId && (input.namespace === undefined || job.namespace === input.namespace))
+
+  let job: Job | undefined
+  let note = ''
+  if (input.jobId === undefined) {
     const listed = await refreshJobs($, { ...ctx, pkg })
     if ('error' in listed) return listed
-    const matches = input.workSpecId
-      ? listed.jobs.filter(job => job.workSpecId === input.workSpecId)
-      : listed.jobs
-    if (matches.length !== 1) {
-      const all = listed.jobs.map(job => `${job.id}${job.workSpecId ? ` (WorkSpec ${job.workSpecId})` : ''}`).join(', ')
-      return {
-        error:
-          matches.length === 0
-            ? `No scheduled job for ${pkg}${input.workSpecId ? ` with WorkSpec ${input.workSpecId}` : ''}. Jobs: ${all || 'none'}. Enqueue the work first.`
-            : `${matches.length} jobs are scheduled for ${pkg}: ${all}. Pass jobId or workSpecId.`,
+    const matches = input.workSpecId ? listed.jobs.filter(one => one.workSpecId === input.workSpecId) : listed.jobs
+    if (matches.length !== 1) return { error: pickError(pkg, listed.jobs, matches.length, input.workSpecId) }
+    job = matches[0]!
+  } else {
+    job = named(await read($, jobs))[0]
+    if (job === undefined) {
+      const listed = await refreshJobs($, { ...ctx, pkg })
+      if ('error' in listed) return listed
+      job = named(listed.jobs)[0]
+      if (job === undefined) {
+        const stale = replacement(listed.jobs, input.jobId)
+        if ('error' in stale) return { error: `${stale.error} ${pickError(pkg, listed.jobs, listed.jobs.length)}` }
+        ;({ job, note } = stale)
       }
     }
-    id = matches[0]!.id
   }
-  const r = await shell($, ctx, `cmd jobscheduler run -f ${pkg} ${id}`, `Force-run job ${id} of ${pkg}`)
+
+  let r = await shell($, ctx, runJobScript(pkg, job), `Force-run job ${job.id} of ${pkg}`)
   if ('error' in r) return r
-  const out = `${r.ran.out}${r.ran.err}`.trim()
-  if (!r.ran.ok || /not found|unknown|error/i.test(out)) return { error: `Job ${id} did not run: ${out}` }
-  return { text: `Forced job ${id} of ${pkg} on ${r.serial}: ${out || 'started'}. Read logcat for the Worker's output.` }
+  let out = `${r.ran.out}${r.ran.err}`.trim()
+  if (isJobMissing(out)) {
+    // WorkManager gives the work a new job id each time it is enqueued.
+    const listed = await refreshJobs($, { ...ctx, pkg })
+    if ('error' in listed) return listed
+    const stale = replacement(listed.jobs, job.id, job)
+    if ('error' in stale) return { error: `Job ${jobLabel(job)} did not run: ${out}. ${pickError(pkg, listed.jobs, listed.jobs.length)}` }
+    ;({ job, note } = stale)
+    r = await shell($, ctx, runJobScript(pkg, job), `Force-run job ${job.id} of ${pkg}`)
+    if ('error' in r) return r
+    out = `${r.ran.out}${r.ran.err}`.trim()
+  }
+  if (!r.ran.ok || isJobMissing(out) || /unknown|error|exception/i.test(out)) {
+    return { error: `Job ${jobLabel(job)} did not run: ${out}` }
+  }
+  return {
+    text: `Forced job ${jobLabel(job)} of ${pkg} on ${r.serial}: ${out || 'started'}.${note} Read logcat for the Worker's output.`,
+  }
+}
+
+/** The job that took a gone id's place: the only one left, or the only one like the old. */
+function replacement(list: readonly Job[], goneId: number, like?: Job): { job: Job; note: string } | { error: string } {
+  const same = like ? list.filter(one => one.namespace === like.namespace && one.component === like.component) : []
+  const pick = same.length === 1 ? same[0]! : list.length === 1 ? list[0]! : undefined
+  if (pick === undefined) return { error: `Job ${goneId} is no longer scheduled.` }
+  return {
+    job: pick,
+    note: ` Job ${goneId} is no longer scheduled; ran job ${pick.id}, which took its place (WorkManager gives work a new job id on each enqueue).`,
+  }
+}
+
+function pickError(pkg: string, all: readonly Job[], matched: number, workSpecId?: string): string {
+  const list = all.map(jobLabel).join(', ')
+  return matched === 0
+    ? `No scheduled job for ${pkg}${workSpecId ? ` with WorkSpec ${workSpecId}` : ''}. Jobs: ${list || 'none'}. Enqueue the work first.`
+    : `${matched} jobs are scheduled for ${pkg}: ${list}. Pass jobId (and namespace when two share an id) or workSpecId.`
 }
 
 async function resetAll($: $, ctx: Ctx): Promise<string> {
@@ -288,6 +360,11 @@ function field(e: unknown, key: string): unknown {
 function str(e: unknown, key: string): string | undefined {
   const v = field(e, key)
   return typeof v === 'string' && v ? v : undefined
+}
+
+/** A pane key per job: its id, and its namespace when it has one (ids repeat across namespaces). */
+function jobKey(job: Job): string {
+  return job.namespace ? `${job.id}-${job.namespace}` : String(job.id)
 }
 
 function press(label: string): string {
@@ -364,14 +441,16 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'run_worker',
       description:
-        "Force-run a scheduled WorkManager/JobScheduler job of the app (`cmd jobscheduler run -f`), ignoring its constraints. " +
-        'With no jobId it lists the app\'s jobs and runs the only one, or the one whose WorkSpec id matches.',
+        "Force-run a scheduled WorkManager/JobScheduler job of the app (`cmd jobscheduler run -f`, with `-n <namespace>` on API 34+ " +
+        "where WorkManager schedules in androidx.work.systemjobscheduler), ignoring its constraints. With no jobId it lists the app's " +
+        'jobs and runs the only one, or the one whose WorkSpec id matches. Job ids change each time work is enqueued; a gone id is re-resolved.',
       isDeferred: false,
       inputSchema: {
         type: 'object',
         properties: {
           jobId: { type: 'integer', description: 'JobScheduler job id.' },
-          workSpecId: { type: 'string', description: 'WorkManager WorkSpec UUID (EXTRA_WORK_SPEC_ID).' },
+          workSpecId: { type: 'string', description: 'WorkManager WorkSpec UUID (EXTRA_WORK_SPEC_ID; dumpsys shows it only before API 34).' },
+          namespace: { type: 'string', description: 'JobScheduler namespace, when two jobs share an id. Found from the job list otherwise.' },
           serial: { type: 'string' },
           package: { type: 'string' },
         },
@@ -449,7 +528,7 @@ export const register: Register = (on, options) => {
     const r = await withBusy($, 'running job', () =>
       runWorker(
         $,
-        { jobId: jobId as number | undefined, workSpecId: str(e, 'workSpecId') },
+        { jobId: jobId as number | undefined, workSpecId: str(e, 'workSpecId'), namespace: str(e, 'namespace') },
         { serial: str(e, 'serial'), pkg: str(e, 'package') },
       ),
     )
@@ -486,11 +565,20 @@ export const register: Register = (on, options) => {
       serialToInsert: !env && ready.length > 1 && chosen !== null ? chosen : null,
     })
     if ('deny' in fix) return { deny: fix.deny }
-    if (fix.notes.length === 0) return next(e)
-    const ran = await next({ ...e, command: fix.command })
+    const command = fix.notes.length === 0 ? e.command : fix.command
+    const ran = await next(command === e.command ? e : { ...e, command })
     if (ran.deny !== undefined) return ran
-    const note = `android-device-console rewrote the command (${fix.notes.join('; ')}): ${fix.command}`
-    return { ...ran, context: [...(ran.context ?? []), note] }
+    const notes: string[] = []
+    if (fix.notes.length > 0) notes.push(`android-device-console rewrote the command (${fix.notes.join('; ')}): ${command}`)
+    const said = `${ran.text ?? ''}\n${ran.isError ? String(ran.result ?? '') : ''}`
+    if (isJobMissing(said) && !/\s(-n|--namespace)\s/.test(command)) {
+      notes.push(
+        'android-device-console: on API 34+ WorkManager 2.9+ schedules its jobs in the JobScheduler namespace ' +
+          'androidx.work.systemjobscheduler, and the job id changes on each enqueue. Retry with ' +
+          '`-n androidx.work.systemjobscheduler`, or call mcp__android-device-console__run_worker, which resolves both.',
+      )
+    }
+    return notes.length === 0 ? ran : { ...ran, context: [...(ran.context ?? []), ...notes] }
   }).catch(($, e, next) => next(e))
 
   // --- system prompt: the device state the model judges UI under ------------
@@ -547,7 +635,7 @@ export const register: Register = (on, options) => {
       })
     const run = (job: Job) =>
       void withBusy($, `running ${job.id}`, async () => {
-        const r = await runWorker($, { jobId: job.id }, { consent: consent(`Run job ${job.id}`) })
+        const r = await runWorker($, { jobId: job.id, namespace: job.namespace ?? undefined }, { consent: consent(`Run job ${job.id}`) })
         await update($, lastMessage, () => ('error' in r ? r.error : r.text))
       })
 
@@ -600,10 +688,11 @@ export const register: Register = (on, options) => {
         <Text bold>Scheduled jobs</Text>
         {jobList.length === 0 ? <Text dimColor>None listed. Refresh after enqueueing work.</Text> : null}
         {jobList.map(job => (
-          <Box key={`job-${job.id}`} flexDirection="row" columnGap={1}>
-            <Button key={`run-${job.id}`} label={`Run ${job.id}`} onPress={() => run(job)} />
+          <Box key={`job-${jobKey(job)}`} flexDirection="row" columnGap={1}>
+            <Button key={`run-${jobKey(job)}`} label={`Run ${job.id}`} onPress={() => run(job)} />
             <Text wrap="truncate-end">
               {job.component.split('/').pop()}
+              {job.namespace === 'androidx.work.systemjobscheduler' ? ' · WorkManager' : job.namespace ? ` · ${job.namespace}` : ''}
               {job.workSpecId ? ` · ${job.workSpecId.slice(0, 8)}` : ''}
               {job.unsatisfied ? ` · waiting on ${job.unsatisfied}` : ''}
             </Text>

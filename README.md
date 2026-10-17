@@ -81,7 +81,7 @@ android-device-console has two options, which you can set in `/config` or under 
 These mods are early. Each passes `claude plugin validate` and its own `claude plugin test` suite, but they have had little use on real projects and devices. Known gaps:
 
 - `dumpsys` output differs between API levels. The parsers read it defensively, but untested API levels may show `?`.
-- Forced RTL needs an app restart. Layout bounds use a `service call` that some system images ignore.
+- Forced RTL uses a per-app Hebrew locale on API 33+ and needs the app's package. Below API 33 it falls back to `debug.force_rtl`, which may need a reboot. Layout bounds use a `service call` that some system images ignore.
 - android-project-lens's `/stability` Gradle init script has not yet been run against every AGP and Kotlin version.
 
 Issues and pull requests are welcome.

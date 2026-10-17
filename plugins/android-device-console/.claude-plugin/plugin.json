@@ -1,6 +1,6 @@
 {
   "name": "android-device-console",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Live Android device console: UI-state toggles, Doze and standby controls, WorkManager job runner, and the device state in the system prompt.",
   "author": {
     "name": "NathanWA",

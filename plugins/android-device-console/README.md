@@ -13,9 +13,9 @@ A Claude Code mod that puts the attached Android device's live state in front of
 - **System prompt section** (`android-device-console:device`): says which device is targeted and its dark mode, font scale, density, RTL, layout-bounds, animation, Doze and standby state. The model then knows a screenshot was taken under, say, dark mode at font 1.3.
 - **Model tools**:
   - `set_device_state`: dark, fontScale, density or `"reset"`, rtl, layoutBounds, animations, and restartApp.
-  - `run_worker`: force-runs a job with `cmd jobscheduler run -f`. Give it a jobId, a workSpecId, or nothing when the app has exactly one job.
+  - `run_worker`: force-runs a job with `cmd jobscheduler run -f`, adding `-n <namespace>` for a job in a JobScheduler namespace. On API 34+ WorkManager 2.9+ schedules its jobs in `androidx.work.systemjobscheduler`. Give it a jobId, a workSpecId, or nothing when the app has exactly one job. WorkManager gives the work a new job id each time it is enqueued; when the id it was given is gone, `run_worker` lists the jobs again and runs the one that took its place, or asks when several could have.
   - `set_doze`: state `idle`/`off` and/or a standby bucket.
-- **Command fixer**: when the model hand-types `cmd jobscheduler run` through Bash, the mod rewrites the command before it runs. It adds a missing `-f`, the package and the job id when exactly one job is known, and it puts the package before the id. It refuses the command, listing the job ids, when it can't tell which job was meant. The model gets a note about each rewrite. The mod never hooks Gradle commands.
+- **Command fixer**: when the model hand-types `cmd jobscheduler run` through Bash, the mod rewrites the command before it runs. It adds a missing `-f`, the package, the job id when exactly one job is known, and `-n <namespace>` when the console knows the job's namespace. It also puts the package before the id. When the device answers "Could not find job" to a run without `-n`, the model gets a note about WorkManager's namespace. Only a command that `adb shell` runs is touched; the same words in a script, a `grep` or a file being written are left alone. It refuses the command, listing the job ids, when it can't tell which job was meant. The model gets a note about each rewrite. The mod never hooks Gradle commands.
 
 ## Target device
 
@@ -46,7 +46,8 @@ When the mod has to use the Bash tool, it never polls: state is re-read only on 
 ## Caveats
 
 - `dumpsys` output differs between API levels. The parsers read defensively and show `?` for anything they can't tell.
-- Forced RTL applies to activities started after the change. Pass `restartApp: true`, or relaunch the app yourself.
+- Forced RTL on API 33+ gives the app a per-app RTL locale (`cmd locale set-app-locales <pkg> --locales he`), so it needs the app's package. The app's activities recreate right-to-left at once; the system UI stays left-to-right. Hebrew is used because an app without `pseudoLocalesEnabled` drops the `ar-XB` pseudo-locale from its resources and stays left-to-right. Text stays in the default language unless the app ships Hebrew strings. RTL off, or `/device reset`, puts back the locales the app had before.
+- Below API 33, or without the package, forced RTL falls back to `debug.force_rtl`. Current Android applies that setting only after a configuration change or a reboot, so the tool says when it used this fallback. Pass `restartApp: true` to relaunch the app.
 - Layout bounds are set with `setprop debug.layout` plus `service call activity 1599295570`. The second command can fail silently on some images.
 - Force idle also runs `dumpsys battery unplug`. **Unforce** or `/device reset` runs `dumpsys battery reset`.
 - FCM testing is not part of this mod.
