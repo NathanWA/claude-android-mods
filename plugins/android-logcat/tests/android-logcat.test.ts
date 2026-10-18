@@ -17,7 +17,7 @@ function fakeBash(on: On, stdout = '') {
  * The session beneath the plugin as the desktop app has it: registrations
  * answered, a Gradle app module on disk, and no `$.process` (adb never starts).
  */
-function fakeSession(on: On, cli = false) {
+function fakeSession(on: On, cli: false | (() => string) = false) {
   const tools: { name: string; isDeferred?: boolean }[] = []
   const commands: string[] = []
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -35,9 +35,10 @@ function fakeSession(on: On, cli = false) {
     return { deny: `ENOENT ${e.path}` }
   })
   on('process.run', ($, e) => {
-    if (!cli) return { deny: '$.process is CLI-only' }
-    const stdout = e.argv.includes('pidof') ? '4321\n' : 'Android Debug Bridge version 1.0.41\n'
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (cli === false) return { deny: '$.process is CLI-only' }
+    const stdout = e.argv.includes('pidof') ? cli() : 'Android Debug Bridge version 1.0.41\n'
+    const exitCode = stdout === '' ? 1 : 0
+    return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
   on('ui.toast', () => ({ value: undefined }))
@@ -203,11 +204,11 @@ describe('the logcat buffer', () => {
 
   test('where $.process works, one live child feeds the pid-scoped buffer', async ($, on) => {
     const clock = mock.clock(on)
-    fakeSession(on, true)
+    fakeSession(on, () => '4321\n')
     const spawned: string[][] = []
     on('process.spawn', async function* ($, e) {
       spawned.push([...e.argv])
-      // Another pid's line is dropped; the app's lines arrive split mid-line.
+      // Another pid's line is not the app's; the app's lines arrive split mid-line.
       yield { stream: 'stdout' as const, text: '10-15 09:20:00.000   999   999 E Other   : not ours\n10-15 09:20:00.100  4321  4321 E AndroidRuntime: FATAL EXC' }
       yield { stream: 'stdout' as const, text: 'EPTION: main\n10-15 09:20:00.200  4321  4321 D OkHttp  : token=abcd1234efgh\n' }
       return { value: { code: 0, signal: null } }
@@ -219,9 +220,127 @@ describe('the logcat buffer', () => {
     const all = await $.tool.call({ tool: GREP })
     if (all.deny !== undefined) throw new Error(all.deny)
     const text = String(all.result)
-    expect(text).toContain('2 of 2 buffered lines match (pid 4321 (com.example.app))')
+    expect(text).toContain('2 of 2 app lines match (com.example.app: pid 4321)')
     expect(text).toContain('FATAL EXCEPTION: main')
     expect(text).toContain('token=<SECRET#1>')
     expect(text).not.toContain('not ours')
+  })
+
+  test('the live child follows the app to its new pid after a restart', async ($, on) => {
+    const clock = mock.clock(on)
+    let devicePid = '18752\n'
+    fakeSession(on, () => devicePid)
+    const spawned: string[] = []
+    on('process.spawn', async function* ($, e) {
+      const target = e.argv[e.argv.length - 1] ?? ''
+      spawned.push(target)
+      const n = target.replace('--pid=', '')
+      yield { stream: 'stdout' as const, text: `10-17 16:3${spawned.length}:00.000 ${n} ${n} D OkHttp  : POST /v1/session/refresh from ${n}\n` }
+      return { value: { code: 0, signal: null } }
+    })
+    await $.session.start({ cwd: '/tmp/app', surface: null, isInteractive: true })
+    await clock.advance(1000)
+
+    // Restarted outside any Bash call this mod sees (another tool, the terminal).
+    devicePid = '18426\n'
+    await clock.advance(5000)
+    expect(spawned).toEqual(['--pid=18752', '--pid=18426'])
+
+    const text = String((await $.tool.call({ tool: GREP, tag: 'OkHttp' })).result)
+    expect(text).toContain('2 of 2 app lines match (com.example.app: pid 18426, earlier 18752)')
+    expect(text).toContain('from 18426')
+  })
+})
+
+describe('restarts and pids', () => {
+  const OLD = [
+    '10-17 16:32:10.000 18752 18752 I Koin    : loaded 42 definitions',
+    '10-17 16:32:15.000 18752 18752 D Stride  : settings opened',
+  ].join('\n')
+  const NEW_OKHTTP = [
+    '10-17 16:54:37.100 18426 18440 D OkHttp  : --> POST https://api.example.com/v1/session/refresh',
+    '10-17 16:54:37.300 18426 18440 D OkHttp  : <-- 200 /v1/session/refresh',
+    '10-17 16:54:38.000 18426 18441 D OkHttp  : <-- 200 /v1/profile/sync',
+  ].join('\n')
+  const PKG = 'com.nathan.moddemoapp'
+
+  /** Bash answering by command, like the Stride repro on emulator-5554. */
+  function device(on: On, answers: (command: string) => string) {
+    on('tool.call', { tool: 'Bash' }, ($, e) => ({
+      result: { stdout: answers(e.command), stderr: '', interrupted: false },
+    }))
+  }
+
+  test('a restart does not strand the new process: grep warns, then rescopes on pidof', async ($, on) => {
+    let pidof = '18752\n'
+    device(on, command =>
+      command.includes('pidof') ? pidof : command.includes('-s OkHttp') ? NEW_OKHTTP : command.includes('logcat') ? OLD : '',
+    )
+    await $.tool.call({ tool: 'Bash', command: `adb shell pidof -s ${PKG}` })
+    await $.tool.call({ tool: 'Bash', command: 'adb logcat -d -t 800' })
+    await $.tool.call({
+      tool: 'Bash',
+      command: `adb shell am force-stop ${PKG} && adb shell am start -d stride://settings`,
+    })
+    // The model's own scoped dump: no ActivityManager lines, only the new pid's.
+    await $.tool.call({ tool: 'Bash', command: 'adb logcat -d -s OkHttp' })
+
+    const stale = String((await $.tool.call({ tool: GREP, tag: 'OkHttp' })).result)
+    expect(stale).toContain('0 of 2 app lines match')
+    expect(stale).toContain('Warning: the app restarted')
+    expect(stale).toContain('3 lines from other pids match (pid 18426)')
+    expect(stale).toContain(`adb shell pidof -s ${PKG}`)
+
+    pidof = '18426\n'
+    await $.tool.call({ tool: 'Bash', command: `adb shell pidof -s ${PKG}` })
+    const fresh = String((await $.tool.call({ tool: GREP, tag: 'OkHttp' })).result)
+    expect(fresh).toContain(`3 of 5 app lines match (${PKG}: pid 18426, earlier 18752)`)
+    expect(fresh).toContain('/v1/profile/sync')
+    expect(fresh).not.toContain('Warning')
+  })
+
+  test('ActivityManager in an unscoped dump rescopes to a lower pid', async ($, on) => {
+    const dump = [
+      OLD,
+      `10-17 16:32:36.000  1300  1450 I ActivityManager: Killing 18752:${PKG}/u0a190 (adj 0): stop ${PKG}`,
+      `10-17 16:32:36.500  1300  1320 I ActivityManager: Start proc 18426:${PKG}/u0a190 for next-top-activity {${PKG}/.MainActivity}`,
+      NEW_OKHTTP,
+    ].join('\n')
+    device(on, command => (command.includes('pidof') ? '18752\n' : command.includes('logcat') ? dump : ''))
+    await $.tool.call({ tool: 'Bash', command: `adb shell pidof -s ${PKG}` })
+    await $.tool.call({ tool: 'Bash', command: 'adb logcat -d -t 800' })
+
+    const text = String((await $.tool.call({ tool: GREP, tag: 'OkHttp' })).result)
+    expect(text).toContain(`3 of 5 app lines match (${PKG}: pid 18426, earlier 18752)`)
+    expect(text).not.toContain('Warning')
+  })
+
+  test('a reused pid does not bring another process in, and repeated dumps are not doubled', async ($, on) => {
+    const later = '10-17 17:05:00.000 18752 18752 I SomeOtherApp: I got pid 18752 after the app died'
+    let dump = OLD
+    device(on, command => (command.includes('pidof') ? '18752\n' : command.includes('logcat') ? dump : ''))
+    await $.tool.call({ tool: 'Bash', command: `adb shell pidof -s ${PKG}` })
+    await $.tool.call({ tool: 'Bash', command: 'adb logcat -d' })
+    await $.tool.call({ tool: 'Bash', command: 'adb logcat -d' })
+    dump = [
+      OLD,
+      `10-17 16:32:36.500  1300  1320 I ActivityManager: Start proc 18426:${PKG}/u0a190 for next-top-activity`,
+      NEW_OKHTTP,
+      later,
+    ].join('\n')
+    await $.tool.call({ tool: 'Bash', command: 'adb logcat -d' })
+
+    const text = String((await $.tool.call({ tool: GREP })).result)
+    expect(text).toContain('5 of 5 app lines match')
+    expect(text).not.toContain('SomeOtherApp')
+    const all = String((await $.tool.call({ tool: GREP, scope: 'all' })).result)
+    expect(all).toContain('7 of 7 buffered lines match')
+  })
+
+  test('logcat in quotes or a heredoc is text, not a call', async ($, on) => {
+    const seen = fakeBash(on)
+    const quoted = ['echo "then run adb logcat to watch"', "cat <<'EOF' > notes.md\nrun `adb logcat` here\nEOF"]
+    for (const command of quoted) await $.tool.call({ tool: 'Bash', command })
+    expect(seen).toEqual(quoted)
   })
 })

@@ -23,6 +23,10 @@ export type LogcatView = {
   matched: number
   pkg?: string
   pid?: number
+  /** The app's earlier pids this session, whose lines are still shown. */
+  earlierPids: number[]
+  /** The app restarted (or looks to have) and its new pid is not known yet. */
+  isPidStale: boolean
   /** `spawn` when this mod owns a live `adb logcat` child; else `observe`. */
   source: 'spawn' | 'observe'
   redactions: number

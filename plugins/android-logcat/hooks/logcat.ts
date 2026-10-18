@@ -26,18 +26,38 @@ export type Bounding = {
 export type BoundTarget = { pid?: number }
 
 /**
+ * Whether text ending at `before` leaves the shell expecting a command: the
+ * start, a separator, a subshell or substitution, a keyword, after any env
+ * assignments and wrappers. Text inside quotes or an argument is not one.
+ */
+function atCommandPosition(before: string): boolean {
+  let rest = before.replace(/\s+$/, '')
+  for (;;) {
+    const wrapper = /(?:^|\s)(?:[A-Za-z_]\w*=\S*|sudo|exec|command|nohup|time|env)$/.exec(rest)
+    if (!wrapper) break
+    rest = rest.slice(0, wrapper.index).replace(/\s+$/, '')
+  }
+
+  return rest === '' || /(?:[;&|({\n`]|\$\(|\b(?:then|do|else|elif))$/.test(rest)
+}
+
+/**
  * Adds `-d -t 800` (or `-t 200 --pid=<pid>` when the app's pid is known) to
- * every logcat call in `command` that would otherwise stream forever.
+ * every logcat call in `command` that would otherwise stream forever. Only
+ * calls the shell would run are touched: none in quotes, comments or a heredoc.
  */
 export function boundLogcat(command: string, target: BoundTarget = {}): Bounding {
   const added: string[] = []
+  const heredoc = command.indexOf('<<')
   const out = command.replace(LOGCAT_CALL, (whole, _globals: string, args: string, offset: number) => {
+    if (heredoc >= 0 && offset > heredoc) return whole
     const tokens = args.trim().split(/\s+/).filter(Boolean)
     if (tokens.some(token => BOUNDED_FLAG.test(token))) return whole
     const after = command.slice(offset + whole.length)
     if (/^\s*\|\s*head\b/.test(after)) return whole
     const before = command.slice(0, offset)
     if (/\btimeout\s+\S+\s*$/.test(before)) return whole
+    if (!atCommandPosition(before)) return whole
     const flags = target.pid !== undefined ? `-t 200 --pid=${target.pid}` : '-d -t 800'
     added.push(flags)
     const at = whole.length - args.length
@@ -208,3 +228,100 @@ export const restartsApp = (command: string) =>
 /** `applicationId = "x"` / `applicationId "x"` in a Gradle build file. */
 export const applicationIdIn = (gradle: string) =>
   /\bapplicationId\s*=?\s*["']([A-Za-z][\w.]*)["']/.exec(gradle)?.[1]
+
+// --- Which pids are the app's -------------------------------------------------
+
+/**
+ * The app's pids over the session. A pid that was the app's keeps the lines it
+ * logged up to `until` (its last line before it was replaced), so a pid the
+ * system later hands to another process does not bring that process's lines in.
+ * There is no "newest pid" by number: pids are reused and can go down.
+ */
+export class AppPids {
+  current: number | undefined
+  /** When `current` was last confirmed (ms); 0 after a restart was seen. */
+  verifiedAt = 0
+  private readonly until = new Map<number, string | undefined>()
+
+  get known(): number[] {
+    return [...this.until.keys()]
+  }
+
+  get earlier(): number[] {
+    return this.known.filter(p => p !== this.current)
+  }
+
+  /** `next` is the app's pid now; answers whether it changed. */
+  adopt(next: number, now: number, lastLineOfCurrent?: string): boolean {
+    this.verifiedAt = now
+    if (next === this.current) return false
+    this.retire(lastLineOfCurrent)
+    this.until.set(next, undefined)
+    this.current = next
+    return true
+  }
+
+  /** The current pid died: it owns its lines up to `lastLine`. */
+  retire(lastLine?: string) {
+    if (this.current === undefined) return
+    this.until.set(this.current, lastLine ?? '')
+    this.current = undefined
+  }
+
+  /** The app restarted (or may have): the current pid is no longer trusted. */
+  distrust() {
+    this.verifiedAt = 0
+  }
+
+  reset() {
+    this.until.clear()
+    this.current = undefined
+    this.verifiedAt = 0
+  }
+
+  /** Whether the line is the app's; with no pid known yet, every line is. */
+  owns(line: LogLine): boolean {
+    if (this.until.size === 0) return true
+    if (!this.until.has(line.pid)) return false
+    const until = this.until.get(line.pid)
+    return until === undefined || until === '' || line.time === '' || line.time <= until
+  }
+}
+
+/** What an ActivityManager line says about `pkg`'s process. */
+export function appEvent(line: LogLine, pkg: string): { kind: 'start' | 'death'; pid: number } | undefined {
+  if (line.tag !== 'ActivityManager') return undefined
+  const start = /\bStart proc (\d+):([\w.]+)\//.exec(line.msg)
+  if (start && start[2] === pkg) return { kind: 'start', pid: Number(start[1]) }
+  const died =
+    /\bProcess ([\w.]+) \(pid (\d+)\) has died/.exec(line.msg) ??
+    /\bKilling (\d+):([\w.]+)\//.exec(line.msg)
+  if (!died) return undefined
+  const [name, n] = died[0].startsWith('Killing') ? [died[2], died[1]] : [died[1], died[2]]
+  return name === pkg ? { kind: 'death', pid: Number(n) } : undefined
+}
+
+/** The pid of `pkg`'s main process in `ps` / `ps -A` output, if listed. */
+export function pidInPs(stdout: string, pkg: string): number | undefined {
+  for (const row of stdout.split('\n')) {
+    const cols = row.trim().split(/\s+/)
+    if (cols.length >= 3 && cols[cols.length - 1] === pkg && /^\d+$/.test(cols[1] ?? '')) return Number(cols[1])
+  }
+  return undefined
+}
+
+/** The first pid `pidof` printed, if any. */
+export const pidInPidof = (stdout: string) => {
+  const first = stdout.trim().split(/\s+/)[0] ?? ''
+  return /^\d+$/.test(first) ? Number(first) : undefined
+}
+
+export const lineKey = (l: LogLine) => `${l.time}\u0000${l.pid}\u0000${l.tid}\u0000${l.level}\u0000${l.tag}\u0000${l.msg}`
+
+/** A threadtime stamp (`MM-DD HH:MM:SS.mmm`) as milliseconds into the year, roughly. */
+export function stampMs(time: string): number | undefined {
+  const m = /^(\d\d)-(\d\d)\s+(\d\d):(\d\d):(\d\d)\.(\d+)/.exec(time)
+  if (!m) return undefined
+  const [, mo, d, h, mi, s, ms] = m.map(Number) as number[]
+  return ((((mo! * 31 + d!) * 24 + h!) * 60 + mi!) * 60 + s!) * 1000 + ms!
+}

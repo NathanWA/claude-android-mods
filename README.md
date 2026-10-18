@@ -51,7 +51,7 @@ claude plugin update android-device-console
 There's nothing to start. Open Claude Code in your Android project and the mods work on their own:
 
 - **build-output-distiller**: ask Claude to build or test (`./gradlew assembleDebug`, `testDebugUnitTest`). The model reads a digest instead of the raw log. Run `/build` to see the last build's errors in a pane.
-- **android-logcat**: when Claude runs `adb logcat`, the call is bounded and redacted. The model can search the buffer with `logcat_grep`. Run `/logcat` to see the buffer.
+- **android-logcat**: when Claude runs `adb logcat`, the call is bounded and redacted. The model can search the buffer with `logcat_grep`. Run `/logcat` to see the buffer. The buffer follows the app when it restarts and gets a new pid, and `logcat_grep` warns if that pid looks stale.
 - **android-device-console**: with a device or emulator connected, run `/device` to open the console. After the first read, the band of toggles stays above the prompt; press 1–6 once the band has focus. Ask Claude things like "screenshot the settings screen in dark mode at font scale 1.3": it calls `set_device_state` itself. `/device reset` restores the defaults.
 - **android-project-lens**: ask about navigation ("which routes take an id?") and the model uses `nav_graph`. Run `/stability` to compile once with Compose compiler reports, or `/stability read` to read existing reports.
 
