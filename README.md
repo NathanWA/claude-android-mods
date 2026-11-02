@@ -11,6 +11,9 @@ Four [Claude Code](https://claude.com/claude-code) mods for Android and Kotlin M
 
 The mods don't overlap: only build-output-distiller hooks Gradle commands, and only android-logcat hooks `adb logcat`.
 
+See video here: 
+https://youtu.be/Y3X5rz9pH5c
+
 ## Requirements
 
 - Claude Code **2.1.299 or newer**. Function-hook mods are early access, and older builds reject some of the events these mods use. Check with `claude --version`.
