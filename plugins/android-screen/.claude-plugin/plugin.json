@@ -1,0 +1,26 @@
+{
+  "name": "android-screen",
+  "version": "0.1.0",
+  "description": "Lets Claude see and drive an Android device: screenshots, a compact view hierarchy with tap points, input and app control, plus a live device mirror pane.",
+  "author": {
+    "name": "NathanWA",
+    "url": "https://github.com/NathanWA"
+  },
+  "license": "MIT",
+  "keywords": ["android", "adb", "screenshot", "uiautomator", "emulator", "mod"],
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "package": {
+      "type": "string",
+      "title": "Application id",
+      "description": "The app's applicationId for /relaunch and the app tool. Left empty, it is read from the app module's build.gradle(.kts).",
+      "default": ""
+    },
+    "mirrorIntervalMs": {
+      "type": "number",
+      "title": "Mirror refresh interval (ms)",
+      "description": "How often the device mirror pane takes a new screenshot while it is shown. Only with $.process; through the Bash tool the mirror refreshes on demand.",
+      "default": 1500
+    }
+  }
+}

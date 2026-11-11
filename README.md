@@ -1,6 +1,6 @@
 # claude-android-mods
 
-Four [Claude Code](https://claude.com/claude-code) mods for Android and Kotlin Multiplatform work. A mod is a plugin of function hooks: it changes what Claude Code shows and does, by drawing a band or pane, adding tools the model can call, or rewriting the model's tool calls before they run.
+Five [Claude Code](https://claude.com/claude-code) mods for Android and Kotlin Multiplatform work. A mod is a plugin of function hooks: it changes what Claude Code shows and does, by drawing a band or pane, adding tools the model can call, or rewriting the model's tool calls before they run.
 
 | Mod | What it gives you |
 | --- | --- |
@@ -8,6 +8,7 @@ Four [Claude Code](https://claude.com/claude-code) mods for Android and Kotlin M
 | [android-logcat](plugins/android-logcat) | Bare `adb logcat` calls get a bound (`-d -t 800`, or `-t 200 --pid=<pid>`) so they can't hang. Secrets are redacted from adb output. A pid-scoped buffer feeds a `logcat_grep` tool and a `/logcat` pane. |
 | [android-device-console](plugins/android-device-console) | A band of live toggles above the prompt: dark mode, font scale, density, RTL, layout bounds, animations. `/device` adds Doze, standby bucket and scheduled jobs with Run buttons. Tools: `set_device_state`, `set_doze`, `run_worker`. The system prompt states the current device state. |
 | [android-project-lens](plugins/android-project-lens) | A `nav_graph` tool that indexes `@Serializable` routes and where nav hosts register them. `/stability` gives Compose stability reports on demand. The system prompt gets the real targetSdk, minSdk and permissions. Claude asks before adding Play-declaration permissions. |
+| [android-screen](plugins/android-screen) | The model can see and drive the device: `screenshot` returns the screen as an image, `ui_tree` gives a compact view hierarchy with tap points (Compose test tags included), and `input` and `app` tap, type, launch, relaunch and open deep links. `/mirror` shows the device screen in a pane; `/deeplink` and `/relaunch` act on the app. |
 
 The mods don't overlap: only build-output-distiller hooks Gradle commands, and only android-logcat hooks `adb logcat`.
 
@@ -17,7 +18,7 @@ https://youtu.be/Y3X5rz9pH5c
 ## Requirements
 
 - Claude Code **2.1.299 or newer**. Function-hook mods are early access, and older builds reject some of the events these mods use. Check with `claude --version`.
-- The Android SDK's `adb` on your `PATH`, or `ANDROID_HOME` / `ANDROID_SDK_ROOT` set, for the three mods that talk to a device.
+- The Android SDK's `adb` on your `PATH`, or `ANDROID_HOME` / `ANDROID_SDK_ROOT` set, for the four mods that talk to a device.
 - An Android or KMP project as the session's working directory.
 
 ## Install
@@ -31,6 +32,7 @@ At the Claude Code prompt:
 /plugin install android-logcat --marketplace NathanWA/claude-android-mods
 /plugin install build-output-distiller --marketplace NathanWA/claude-android-mods
 /plugin install android-project-lens --marketplace NathanWA/claude-android-mods
+/plugin install android-screen --marketplace NathanWA/claude-android-mods
 ```
 
 The first install asks `Add marketplace?`: answer `y`. Then choose a scope; the user scope is first and is the usual choice. The mod is active in that session right away and in every session you start after.
@@ -57,6 +59,7 @@ There's nothing to start. Open Claude Code in your Android project and the mods 
 - **android-logcat**: when Claude runs `adb logcat`, the call is bounded and redacted. The model can search the buffer with `logcat_grep`. Run `/logcat` to see the buffer. The buffer follows the app when it restarts and gets a new pid, and `logcat_grep` warns if that pid looks stale.
 - **android-device-console**: with a device or emulator connected, run `/device` to open the console. After the first read, the band of toggles stays above the prompt; press 1–6 once the band has focus. Ask Claude things like "screenshot the settings screen in dark mode at font scale 1.3": it calls `set_device_state` itself. `/device reset` restores the defaults.
 - **android-project-lens**: ask about navigation ("which routes take an id?") and the model uses `nav_graph`. Run `/stability` to compile once with Compose compiler reports, or `/stability read` to read existing reports.
+- **android-screen**: ask Claude to check its work on the device ("open the settings screen and screenshot it") and it uses `screenshot`, `ui_tree`, `input` and `app` itself. Run `/mirror` to watch the screen in a pane, with Back, Home and Recents buttons.
 
 ### Permission prompts in the desktop app
 
@@ -71,6 +74,8 @@ The mods never poll through the Bash tool. In the desktop app, device state is r
 ### Choosing a device
 
 android-device-console picks its target in this order: `ANDROID_SERIAL`, then the device you picked in `/device`, then the only connected device. When several devices are connected and none is chosen, it asks rather than guesses.
+
+android-screen uses the same order without the `/device` pick: a `serial` passed to a tool, then `ANDROID_SERIAL`, then the only connected device. Its `/mirror` pane offers a button per device when several are connected.
 
 ### Options
 
