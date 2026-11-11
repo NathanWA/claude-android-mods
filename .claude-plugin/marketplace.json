@@ -24,6 +24,11 @@
       "name": "android-project-lens",
       "source": "./plugins/android-project-lens",
       "description": "A navigation route index, Compose stability reports on demand, and the real manifest SDKs and permissions for the model."
+    },
+    {
+      "name": "android-screen",
+      "source": "./plugins/android-screen",
+      "description": "Lets Claude see and drive the device: screenshots, a compact view hierarchy with tap points, input and app control, and a /mirror pane."
     }
   ]
 }
